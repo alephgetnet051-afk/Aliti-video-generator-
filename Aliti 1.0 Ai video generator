@@ -1,0 +1,84 @@
+// server.js
+const express = require('express');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const { v4: uuidv4 } = require('uuid');
+const cors = require('cors');
+const aiProvider = require('./services/aiProvider');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// simple in-memory jobs store (swap for DB in production)
+const JOBS = {};
+
+// store uploads in ./uploads
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
+});
+const upload = multer({ storage });
+
+// Endpoint: create generation job
+app.post('/api/generate', upload.single('image'), async (req, res) => {
+  try {
+    const prompt = req.body.prompt || '';
+    if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
+
+    // image is optional; provider may accept prompt-only
+    const imagePath = req.file ? req.file.path : null;
+
+    const jobId = uuidv4();
+    JOBS[jobId] = { id: jobId, status: 'queued', createdAt: Date.now(), prompt, imagePath };
+
+    // Kick off background task (simulated here)
+    startWorker(jobId).catch(err => console.error('Worker error', err));
+
+    res.json({ jobId, status: JOBS[jobId].status });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/status/:id', (req, res) => {
+  const job = JOBS[req.params.id];
+  if (!job) return res.status(404).json({ error: 'Not found' });
+  res.json(job);
+});
+
+app.get('/download/:id', (req, res) => {
+  const job = JOBS[req.params.id];
+  if (!job || job.status !== 'done') return res.status(404).send('Not ready');
+  const file = job.outputPath;
+  res.download(file);
+});
+
+async function startWorker(jobId) {
+  const job = JOBS[jobId];n
+  if (!job) throw new Error('Job missing');
+  job.status = 'processing';
+
+  try {
+    // Use the provider adapter. Replace this with real provider credentials & logic.
+    const result = await aiProvider.generateVideo({ prompt: job.prompt, imagePath: job.imagePath });
+
+    // aiProvider should return a path to the resulting video file (local path)
+    job.outputPath = result.outputPath;
+    job.status = 'done';
+    job.completedAt = Date.now();
+  } catch (err) {
+    console.error('Generation failed for', jobId, err);
+    job.status = 'failed';
+    job.error = String(err.message || err);
+  }
+}
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Aliti server listening on http://localhost:${PORT}`));
